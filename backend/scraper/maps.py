@@ -195,32 +195,73 @@ def search_google_maps(
                 feed.evaluate("(el) => { el.scrollTop = el.scrollHeight; }")
                 time.sleep(settings.maps.scroll_pause)
 
-            # Iterate through cards and click each to extract details
-            cards = feed.locator('a[href*="/maps/place/"]')
-            total = min(cards.count(), max_results)
-            for i in range(total):
+            # Extract everything from the visible cards in a single JS
+            # pass — no per-card clicking. Each card's container holds
+            # name, rating, reviews, category, address, phone, and the
+            # website link inline, so we can read it all without ever
+            # opening the side panel. This is dramatically faster and
+            # also sidesteps the stale-panel bug entirely (no panel,
+            # no panel desync).
+            raw_cards = page.evaluate(
+                """
+                (max) => {
+                  const feed = document.querySelector('div[role=\"feed\"]');
+                  if (!feed) return [];
+                  const anchors = Array.from(
+                    feed.querySelectorAll('a[href*=\"/maps/place/\"]')
+                  ).slice(0, max);
+                  return anchors.map(a => {
+                    // The card container is usually the anchor's parent.
+                    // Walk up if needed to find the wrapper that holds
+                    // both the link and the metadata siblings.
+                    let card = a.parentElement || a;
+                    for (let i = 0; i < 4; i++) {
+                      if (card.querySelector('a[data-value=\"Website\"]') ||
+                          card.querySelector('span[role=\"img\"][aria-label*=\"star\" i]')) {
+                        break;
+                      }
+                      if (card.parentElement) card = card.parentElement;
+                    }
+                    const text = (card.innerText || '').trim();
+                    // Website is exposed as a separate anchor with this
+                    // data-value attribute on Maps result cards.
+                    const webEl = card.querySelector('a[data-value=\"Website\"]');
+                    const website = webEl ? webEl.getAttribute('href') || '' : '';
+                    // Rating widget exposes "X.Y stars N Reviews" via
+                    // aria-label on a span.
+                    const rateEl = card.querySelector(
+                      'span[role=\"img\"][aria-label*=\"star\" i]'
+                    );
+                    const ratingLabel = rateEl
+                      ? rateEl.getAttribute('aria-label') || ''
+                      : '';
+                    return {
+                      name: a.getAttribute('aria-label') || '',
+                      href: a.getAttribute('href') || '',
+                      text,
+                      website,
+                      ratingLabel,
+                    };
+                  });
+                }
+                """,
+                max_results,
+            )
+            total = len(raw_cards)
+            for i, raw in enumerate(raw_cards):
                 try:
-                    card = cards.nth(i)
-                    name = (card.get_attribute("aria-label") or "").strip()
-                    href = card.get_attribute("href") or ""
-
-                    biz = Business(name=name, maps_url=href)
-
-                    # Click to open details panel
-                    try:
-                        card.scroll_into_view_if_needed(timeout=3000)
-                        card.click(timeout=5000)
-                        page.wait_for_timeout(900)
-                    except Exception:
-                        pass
-
-                    _extract_details(page, biz)
-                    if biz.name:
+                    biz = _build_from_card(raw)
+                    if biz and biz.name:
                         results.append(biz)
                     if progress:
-                        progress("maps", i + 1, total, f"Captured {biz.name or 'listing'}")
+                        progress(
+                            "maps",
+                            i + 1,
+                            total,
+                            f"Captured {raw.get('name') or 'listing'}",
+                        )
                 except Exception as exc:
-                    logger.debug("Card %s failed: %s", i, exc)
+                    logger.debug("Card %s parse failed: %s", i, exc)
                     continue
         finally:
             ctx.close()
@@ -228,6 +269,144 @@ def search_google_maps(
 
     logger.info("Maps captured %d businesses", len(results))
     return results
+
+
+_CARD_PHONE_RE = re.compile(
+    r"(\+?1?[\s.\-]*\(?\d{3}\)?[\s.\-]*\d{3}[\s.\-]*\d{4})"
+)
+
+
+def _build_from_card(raw: dict) -> Optional[Business]:
+    """Parse a single card-extraction record into a `Business`.
+
+    The card's `text` is the full innerText of the result tile, which
+    looks roughly like:
+
+        ABC Garage Door Repair
+        4.8(123)
+        Garage door supplier
+        Open · Closes 5 PM
+        123 Main St, Dallas, TX
+        "Quote excerpt..."
+        (214) 555-1234
+
+    We pull rating/reviews from the dedicated `ratingLabel`, phone via
+    regex, and treat the line that mentions a state / zip / "St"-style
+    suffix as the address. The line just before the address (and not
+    matching status / hours / quote markers) is the category.
+    """
+    name = (raw.get("name") or "").strip()
+    if not name:
+        return None
+    href = raw.get("href") or ""
+    text = raw.get("text") or ""
+    website = (raw.get("website") or "").strip()
+
+    biz = Business(name=name, maps_url=href, website=website)
+
+    # Rating + reviews from the dedicated aria-label, falls back to text
+    rate_label = raw.get("ratingLabel") or ""
+    biz.rating, biz.reviews = _parse_rating_block(rate_label or text)
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    # Phone — first regex match anywhere in the card text
+    for ln in lines:
+        m = _CARD_PHONE_RE.search(ln)
+        if m:
+            biz.phone = m.group(1).strip()
+            break
+
+    # Address heuristic: a line containing a comma + (state code or zip
+    # or "St"/"Rd"/"Ave"/"Blvd" etc.). Prefer the last such line in case
+    # there's a quoted review that also mentions a place.
+    addr_idx = -1
+    for i, ln in enumerate(lines):
+        if "," in ln and (
+            re.search(r"\b[A-Z]{2}\b", ln) or
+            re.search(r"\b\d{4,6}\b", ln) or
+            re.search(r"\b(St|Rd|Ave|Blvd|Dr|Ln|Way|Hwy|Pkwy|Ct)\b\.?", ln)
+        ):
+            addr_idx = i
+    if addr_idx >= 0:
+        biz.address = lines[addr_idx]
+
+    # Category: the line(s) above the address that aren't the name,
+    # rating, hours/status ("Open · ...", "Closed"), or a quoted review.
+    if addr_idx > 0:
+        for j in range(addr_idx - 1, -1, -1):
+            ln = lines[j]
+            low = ln.lower()
+            if ln == name:
+                continue
+            if re.match(r"^\d+(\.\d+)?\s*\(", ln):  # rating "4.8(123)"
+                continue
+            if low.startswith(("open", "closed", "closes", "opens", "·")):
+                continue
+            if ln.startswith(('"', '“')):
+                continue
+            biz.category = ln
+            break
+
+    return biz
+
+
+def _panel_place_id(href: str) -> str:
+    """Extract the stable place id chunk from a Maps `/place/` URL.
+
+    Two URLs for the same place share the segment after `!1s` (e.g.
+    `0x...:0x...`). Comparing this is far more reliable than matching the
+    name, which gets truncated / decorated in the panel.
+    """
+    if not href:
+        return ""
+    m = re.search(r"!1s([^!?/]+)", href)
+    if m:
+        return m.group(1)
+    # Fallback: the human-readable slug between `/place/` and the next `/`
+    m = re.search(r"/place/([^/]+)/", href)
+    return m.group(1) if m else ""
+
+
+def _read_panel_h1(page) -> str:
+    """Read the side-panel title quickly. Empty string on failure."""
+    try:
+        return (page.locator("h1").first.inner_text(timeout=200) or "").strip()
+    except Exception:
+        return ""
+
+
+def _wait_for_panel(
+    page,
+    biz: Business,
+    prev_h1: str = "",
+    timeout_ms: int = 4000,
+) -> str:
+    """Block until the side panel's `<h1>` differs from `prev_h1`.
+
+    We don't try to *match* the new h1 to the card name — Maps truncates,
+    decorates, or reformats titles in the panel which made substring
+    matching unreliable. Instead we just wait for the title to *change*
+    from the previous card's title; that's the cheapest reliable signal
+    that the panel has swapped. Returns the new h1 (or whatever was
+    last read on timeout).
+    """
+    target_id = _panel_place_id(biz.maps_url)
+    deadline = time.time() + timeout_ms / 1000.0
+    h1 = ""
+    while time.time() < deadline:
+        h1 = _read_panel_h1(page)
+        if h1 and h1 != prev_h1:
+            return h1
+        if target_id:
+            try:
+                if _panel_place_id(page.url) == target_id:
+                    # URL synced even if h1 is still painting
+                    return h1 or prev_h1
+            except Exception:
+                pass
+        page.wait_for_timeout(100)
+    return h1
 
 
 def _extract_details(page, biz: Business) -> None:

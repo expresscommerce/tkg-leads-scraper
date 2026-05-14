@@ -6,10 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+import re
+
 from .config import settings
 from .maps import CSV_COLUMNS, Business, search_google_maps
 from .meta_ads import check_meta_ads
-from .utils import default_filename, get_logger, parse_locations, write_csv
+from .utils import default_filename, domain, get_logger, parse_locations, write_csv
 from .website import enrich_websites
 
 logger = get_logger("scraper.pipeline")
@@ -33,16 +35,65 @@ class PipelineResult:
 
 
 def _dedupe(businesses: list[Business]) -> list[Business]:
-    """Remove duplicates by (name, address) — keeps first occurrence."""
-    seen: set[tuple[str, str]] = set()
+    """Collapse duplicates that look like the same business.
+
+    Maps often returns the *same* place under slightly different display names
+    across keyword/location combos (e.g. "ABC Plumbing" vs "ABC Plumbing LLC"),
+    so a name+address key alone leaks duplicates. We additionally key on:
+      - phone (digits only) — strongest identifier when present
+      - website domain      — chains aside, this is per-business
+      - name+address        — fallback
+    A new record is dropped if *any* of its keys is already seen.
+    Keeps the first occurrence (preserves the keyword that found it first).
+    """
+    seen_phone: set[str] = set()
+    seen_domain: set[str] = set()
+    seen_name_addr: set[tuple[str, str]] = set()
     out: list[Business] = []
     for b in businesses:
-        key = (b.name.strip().lower(), b.address.strip().lower())
-        if not key[0] or key in seen:
+        name = b.name.strip().lower()
+        if not name:
             continue
-        seen.add(key)
+        addr = b.address.strip().lower()
+        phone_key = re.sub(r"\D+", "", b.phone or "")
+        dom_key = domain(b.website) if b.website else ""
+        name_addr_key = (name, addr)
+
+        if phone_key and phone_key in seen_phone:
+            continue
+        if dom_key and dom_key in seen_domain:
+            continue
+        if name_addr_key in seen_name_addr:
+            continue
+
+        if phone_key:
+            seen_phone.add(phone_key)
+        if dom_key:
+            seen_domain.add(dom_key)
+        seen_name_addr.add(name_addr_key)
         out.append(b)
     return out
+
+
+def _dedupe_emails_globally(businesses: list[Business]) -> None:
+    """Ensure each email appears on exactly one business across the whole run.
+
+    Prevents the "same email under 5 different business names" case that
+    happens when distinct Maps listings share a website (chains, multi-brand
+    owners, agencies). Mutates `businesses` in place; first occurrence wins.
+    """
+    seen: set[str] = set()
+    for b in businesses:
+        if not b.emails:
+            continue
+        kept: list[str] = []
+        for em in b.emails:
+            key = em.lower().strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            kept.append(em)
+        b.emails = kept
 
 
 def run_pipeline(
@@ -159,6 +210,9 @@ def run_pipeline(
     if not skip_websites:
         try:
             enrich_websites(businesses, progress=progress)
+            # Strip emails that already appear on an earlier business so the
+            # same address never lands under multiple business names.
+            _dedupe_emails_globally(businesses)
             emit("website_done", len(businesses), len(businesses), "Website enrichment complete")
             # Checkpoint #2: after website enrichment
             web_csv = _save_checkpoint("websites")

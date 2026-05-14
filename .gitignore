@@ -9,3 +9,4 @@ output/
 .idea/
 .vscode/
 .playwright/
+cities.txt
