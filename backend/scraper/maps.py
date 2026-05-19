@@ -29,7 +29,6 @@ class Business:
     extra_phones: list[str] = field(default_factory=list)
     facebook_url: str = ""
     running_meta_ads: bool = False
-    meta_ad_count: int = 0
     meta_ad_snapshot_url: str = ""
     meta_ad_start_date: str = ""
     meta_ad_copy: str = ""
@@ -67,7 +66,6 @@ class Business:
             "email": email,
             "facebook_url": self.facebook_url,
             "running_meta_ads": self.running_meta_ads,
-            "meta_ad_count": self.meta_ad_count,
             "meta_ad_library_url": self.meta_ad_snapshot_url,
             "meta_ad_start_date": self.meta_ad_start_date,
             "meta_ad_copy": self.meta_ad_copy,
@@ -97,7 +95,6 @@ CSV_COLUMNS = [
     "email",
     "facebook_url",
     "running_meta_ads",
-    "meta_ad_count",
     "meta_ad_library_url",
     "meta_ad_start_date",
     "meta_ad_copy",
@@ -263,6 +260,27 @@ def search_google_maps(
                 except Exception as exc:
                     logger.debug("Card %s parse failed: %s", i, exc)
                     continue
+
+            # Second pass: addresses are no longer in the card text on modern
+            # Google Maps. Visit each business's place URL and read the address
+            # from the side panel's `[data-item-id="address"]` button. Slower,
+            # but the only reliable way to get a full street address.
+            for i, biz in enumerate(results):
+                if biz.address or not biz.maps_url:
+                    continue
+                try:
+                    addr = _fetch_address(page, biz.maps_url)
+                    if addr:
+                        biz.address = addr
+                except Exception as exc:
+                    logger.debug("Address fetch failed for %s: %s", biz.name, exc)
+                if progress:
+                    progress(
+                        "maps",
+                        i + 1,
+                        len(results),
+                        f"Address: {biz.name[:40]} — {biz.address[:50] or 'n/a'}",
+                    )
         finally:
             ctx.close()
             browser.close()
@@ -274,6 +292,44 @@ def search_google_maps(
 _CARD_PHONE_RE = re.compile(
     r"(\+?1?[\s.\-]*\(?\d{3}\)?[\s.\-]*\d{3}[\s.\-]*\d{4})"
 )
+
+
+def _fetch_address(page, maps_url: str) -> str:
+    """Open a place's Maps URL and return its address from the side panel.
+
+    Reads the `aria-label` of the `[data-item-id="address"]` button which
+    Google renders as "Address: 123 Main St, Houston, TX 77002". Falls
+    back to similar selectors when the markup shifts.
+    """
+    from playwright.sync_api import TimeoutError as PWTimeout
+
+    try:
+        page.goto(maps_url, wait_until="domcontentloaded")
+    except Exception:
+        return ""
+
+    try:
+        page.wait_for_selector('[data-item-id="address"]', timeout=8000)
+    except PWTimeout:
+        pass
+
+    selectors = (
+        '[data-item-id="address"]',
+        'button[aria-label^="Address"]',
+        'button[data-tooltip="Copy address"]',
+    )
+    for sel in selectors:
+        try:
+            el = page.locator(sel).first
+            label = el.get_attribute("aria-label", timeout=1500) or ""
+            if label:
+                return label.split(":", 1)[-1].strip()
+            text = (el.inner_text(timeout=1500) or "").strip()
+            if text:
+                return text
+        except Exception:
+            continue
+    return ""
 
 
 def _build_from_card(raw: dict) -> Optional[Business]:
