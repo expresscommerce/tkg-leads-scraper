@@ -28,6 +28,8 @@ class Business:
     emails: list[str] = field(default_factory=list)
     extra_phones: list[str] = field(default_factory=list)
     facebook_url: str = ""
+    instagram_url: str = ""
+    tiktok_url: str = ""
     running_meta_ads: bool = False
     meta_ad_snapshot_url: str = ""
     meta_ad_start_date: str = ""
@@ -65,6 +67,8 @@ class Business:
             "reviews": self.reviews if self.reviews is not None else "",
             "email": email,
             "facebook_url": self.facebook_url,
+            "instagram_url": self.instagram_url,
+            "tiktok_url": self.tiktok_url,
             "running_meta_ads": self.running_meta_ads,
             "meta_ad_library_url": self.meta_ad_snapshot_url,
             "meta_ad_start_date": self.meta_ad_start_date,
@@ -94,6 +98,8 @@ CSV_COLUMNS = [
     "reviews",
     "email",
     "facebook_url",
+    "instagram_url",
+    "tiktok_url",
     "running_meta_ads",
     "meta_ad_library_url",
     "meta_ad_start_date",
@@ -132,7 +138,9 @@ def search_google_maps(
     Returns:
         List of `Business` records.
     """
+        # pyrefly: ignore [missing-import]
     from playwright.sync_api import TimeoutError as PWTimeout
+        # pyrefly: ignore [missing-import]
     from playwright.sync_api import sync_playwright
 
     search_term = f"{query} in {location}".strip()
@@ -301,6 +309,7 @@ def _fetch_address(page, maps_url: str) -> str:
     Google renders as "Address: 123 Main St, Houston, TX 77002". Falls
     back to similar selectors when the markup shifts.
     """
+    # pyrefly: ignore [missing-import]
     from playwright.sync_api import TimeoutError as PWTimeout
 
     try:

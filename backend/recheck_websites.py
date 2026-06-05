@@ -32,7 +32,8 @@ from scraper.maps import Business, CSV_COLUMNS      # noqa: E402
 from scraper.meta_ads import check_meta_ads         # noqa: E402
 from scraper.utils import (                         # noqa: E402
     extract_emails, extract_facebook,
-    extract_phones, get_logger, write_csv,
+    extract_instagram, extract_phones,
+    extract_tiktok, get_logger, write_csv,
 )
 from scraper.website import enrich_websites         # noqa: E402
 
@@ -78,6 +79,8 @@ def _load_businesses(path: Path) -> list[Business]:
                 category=(row.get("category") or "").strip(),
                 maps_url=(row.get("maps_url") or "").strip(),
                 facebook_url=(row.get("facebook_url") or "").strip(),
+                instagram_url=(row.get("instagram_url") or "").strip(),
+                tiktok_url=(row.get("tiktok_url") or "").strip(),
                 running_meta_ads=str(row.get("running_meta_ads", "")).lower() in ("true", "1", "yes"),
                 meta_ad_snapshot_url=(row.get("meta_ad_library_url") or "").strip(),
                 meta_ad_start_date=(row.get("meta_ad_start_date") or "").strip(),
@@ -98,11 +101,14 @@ def _load_businesses(path: Path) -> list[Business]:
 
 # ── Playwright fallback ───────────────────────────────────────────────────────
 
-def _parse_html_pw(html: str) -> tuple[str, str]:
-    """Extract aggregated text + facebook URL from rendered HTML."""
+def _parse_html_pw(html: str) -> tuple[str, str, str, str]:
+    """Extract aggregated text + facebook, instagram, tiktok URLs from rendered HTML."""
+        # pyrefly: ignore [missing-import]
     from bs4 import BeautifulSoup
     aggregated = ""
     fb_found = ""
+    insta_found = ""
+    tiktok_found = ""
     try:
         soup = BeautifulSoup(html, "html.parser")
         for a in soup.select("a[href]"):
@@ -113,15 +119,20 @@ def _parse_html_pw(html: str) -> tuple[str, str]:
                 aggregated += " " + href[4:]
             elif ("facebook.com" in href or "fb.com" in href) and not fb_found:
                 fb_found = extract_facebook(href) or fb_found
+            elif ("instagram.com" in href or "instagr.am" in href) and not insta_found:
+                insta_found = extract_instagram(href) or insta_found
+            elif "tiktok.com" in href and not tiktok_found:
+                tiktok_found = extract_tiktok(href) or tiktok_found
         aggregated += " " + soup.get_text(" ", strip=True)
     except Exception:
         aggregated = html
-    return aggregated, fb_found
+    return aggregated, fb_found, insta_found, tiktok_found
 
 
 def _playwright_enrich(businesses: list[Business], progress=None,
                         offset: int = 0, total: int = 0) -> None:
     """Playwright pass: visit sites that returned no data from requests."""
+        # pyrefly: ignore [missing-import]
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
     if not businesses:
@@ -144,16 +155,22 @@ def _playwright_enrich(businesses: list[Business], progress=None,
 
             aggregated = ""
             fb_found = biz.facebook_url or ""
+            insta_found = biz.instagram_url or ""
+            tiktok_found = biz.tiktok_url or ""
 
             for path in settings.website.pages:
                 url = urljoin(base + "/", path.lstrip("/")) if path else base
                 try:
                     page.goto(url, wait_until="domcontentloaded", timeout=15_000)
                     html = page.content()
-                    chunk, fb = _parse_html_pw(html)
+                    chunk, fb, insta, tiktok = _parse_html_pw(html)
                     aggregated += " " + chunk
                     if fb and not fb_found:
                         fb_found = fb
+                    if insta and not insta_found:
+                        insta_found = insta
+                    if tiktok and not tiktok_found:
+                        tiktok_found = tiktok
                 except PWTimeout:
                     logger.info("Playwright timeout: %s", url)
                     if not aggregated:
@@ -174,6 +191,10 @@ def _playwright_enrich(businesses: list[Business], progress=None,
                     biz.extra_phones = [p for p in extra if p != biz.phone]
                 if fb_found:
                     biz.facebook_url = fb_found
+                if insta_found:
+                    biz.instagram_url = insta_found
+                if tiktok_found:
+                    biz.tiktok_url = tiktok_found
             else:
                 logger.info("Playwright no data: %s", biz.name)
 

@@ -15,6 +15,12 @@ PHONE_RE = re.compile(
     r"(?:\+?1[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})"
 )
 FB_RE = re.compile(r"https?://(?:www\.)?(?:facebook|fb)\.com/[A-Za-z0-9_.\-/]+", re.I)
+INSTAGRAM_RE = re.compile(
+    r"https?://(?:www\.)?(?:instagram\.com|instagr\.am)/[A-Za-z0-9_.\-/]+", re.I
+)
+TIKTOK_RE = re.compile(
+    r"https?://(?:www\.)?tiktok\.com/[@A-Za-z0-9_.\-/]+", re.I
+)
 
 
 def get_logger(name: str = "scraper", level: str = "INFO") -> logging.Logger:
@@ -112,6 +118,34 @@ def extract_facebook(text: str) -> str:
     url = match.group(0).rstrip("/").split("?")[0]
     # Filter helper urls
     bad = ("/sharer", "/plugins", "/tr", "/dialog")
+    if any(b in url for b in bad):
+        return ""
+    return url
+
+
+def extract_instagram(text: str) -> str:
+    if not text:
+        return ""
+    match = INSTAGRAM_RE.search(text)
+    if not match:
+        return ""
+    url = match.group(0).rstrip("/").split("?")[0]
+    # Filter non-profile URLs and general info pages
+    bad = ("/p/", "/reel/", "/tv/", "/stories/", "/developer", "/about", "/legal", "/directory")
+    if any(b in url for b in bad):
+        return ""
+    return url
+
+
+def extract_tiktok(text: str) -> str:
+    if not text:
+        return ""
+    match = TIKTOK_RE.search(text)
+    if not match:
+        return ""
+    url = match.group(0).rstrip("/").split("?")[0]
+    # Filter helper paths
+    bad = ("/share", "/embed")
     if any(b in url for b in bad):
         return ""
     return url
