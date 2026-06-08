@@ -41,7 +41,6 @@ logger = get_logger("scraper.recheck_meta")
 # Columns the Meta stage owns — only these get overwritten on each row.
 META_COLUMNS = (
     "running_meta_ads",
-    "meta_ad_count",
     "meta_ad_library_url",
     "meta_ad_start_date",
     "meta_ad_copy",
@@ -92,7 +91,6 @@ def _apply_results(pairs: list[tuple[Business, list[dict]]]) -> None:
     for biz, grp in pairs:
         for r in grp:
             r["running_meta_ads"] = str(bool(biz.running_meta_ads))
-            r["meta_ad_count"] = str(biz.meta_ad_count) if biz.meta_ad_count else ""
             # Always refresh the snapshot URL — even on misses we now record the
             # search URL so a human can sanity-check.
             if biz.meta_ad_snapshot_url:

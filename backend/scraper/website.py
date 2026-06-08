@@ -7,6 +7,7 @@ from typing import Optional
 from urllib.parse import urljoin
 
 import requests
+    # pyrefly: ignore [missing-import]
 from bs4 import BeautifulSoup
 
 from .config import settings
@@ -14,7 +15,9 @@ from .maps import Business
 from .utils import (
     extract_emails,
     extract_facebook,
+    extract_instagram,
     extract_phones,
+    extract_tiktok,
     get_logger,
 )
 
@@ -55,7 +58,9 @@ def _enrich_one(biz: Business) -> Business:
         base = "https://" + base
 
     aggregated = ""
-    fb_found = ""
+    fb_found = biz.facebook_url or ""
+    insta_found = biz.instagram_url or ""
+    tiktok_found = biz.tiktok_url or ""
     # Try the base page first; if it fails, skip the secondary pages
     # (this avoids 4 timeouts per dead site on large runs).
     for idx, path in enumerate(settings.website.pages):
@@ -76,11 +81,18 @@ def _enrich_one(biz: Business) -> Business:
                     aggregated += " " + href[7:]
                 elif href.startswith("tel:"):
                     aggregated += " " + href[4:]
-                elif "facebook.com" in href or "fb.com" in href:
-                    if not fb_found:
-                        candidate = extract_facebook(href)
-                        if candidate:
-                            fb_found = candidate
+                elif ("facebook.com" in href or "fb.com" in href) and not fb_found:
+                    candidate = extract_facebook(href)
+                    if candidate:
+                        fb_found = candidate
+                elif ("instagram.com" in href or "instagr.am" in href) and not insta_found:
+                    candidate = extract_instagram(href)
+                    if candidate:
+                        insta_found = candidate
+                elif "tiktok.com" in href and not tiktok_found:
+                    candidate = extract_tiktok(href)
+                    if candidate:
+                        tiktok_found = candidate
             aggregated += " " + soup.get_text(" ", strip=True)
         except Exception:
             aggregated += " " + html
@@ -92,6 +104,10 @@ def _enrich_one(biz: Business) -> Business:
         biz.extra_phones = [p for p in extra if p != biz.phone]
     if fb_found:
         biz.facebook_url = fb_found
+    if insta_found:
+        biz.instagram_url = insta_found
+    if tiktok_found:
+        biz.tiktok_url = tiktok_found
     return biz
 
 

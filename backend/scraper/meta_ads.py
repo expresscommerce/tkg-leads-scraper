@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 import time
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote, urlparse
 
 from .config import settings
 from .maps import Business
@@ -34,7 +34,7 @@ _RESULT_COUNT_RE = re.compile(r"~?\s*([\d,]+)\s+result", re.I)
 def _build_url(term: str) -> str:
     return _AD_LIBRARY_URL.format(
         country=settings.meta.country,
-        query=quote_plus(term),
+        query=quote(term, safe=""),
     )
 
 
@@ -64,6 +64,79 @@ def _fb_slug(url: str) -> str:
     return slug
 
 
+def _check_advertiser_card(page, biz_name: str) -> bool:
+    """Check if any advertiser card on the page belongs to this business AND
+    has an "Active ads" badge.
+
+    Strategy: read the rendered page text, find every position where
+    "Active ads" appears, and check if the business name is within ~600
+    characters of that badge (the typical size of one advertiser card).
+    """
+    if not biz_name:
+        return False
+
+    try:
+        body = page.inner_text("body", timeout=4000)
+    except Exception:
+        return False
+
+    if not body:
+        return False
+
+    # Find every "Active ads" occurrence in the page text
+    positions = [m.start() for m in re.finditer(r"Active\s+ads", body, re.I)]
+    if not positions:
+        return False
+
+    # For each badge, check the surrounding ±1500 chars (one card's worth)
+    # for the business name. Larger window handles cards with photos/extra UI.
+    window = 1500
+    for pos in positions:
+        chunk = body[max(0, pos - window): pos + window]
+        if _name_matches(biz_name, chunk):
+            return True
+
+    return False
+
+
+def _name_matches(biz_name: str, card_text: str) -> bool:
+    """Check if the business name appears in the advertiser card text.
+
+    Uses fuzzy matching to handle minor differences like punctuation,
+    extra words (LLC, Inc, Co.), and case differences.
+    """
+    if not biz_name or not card_text:
+        return False
+
+    # Normalize both strings: lowercase, strip punctuation, strip legal suffixes
+    def normalize(s: str) -> str:
+        s = s.lower()
+        s = re.sub(r"[^\w\s]", " ", s)  # remove punctuation (including &)
+        # Only strip truly generic legal entity suffixes — never industry words
+        s = re.sub(r"\b(llc|inc|ltd|corp|co)\b", "", s)
+        return re.sub(r"\s+", " ", s).strip()
+
+    norm_biz = normalize(biz_name)
+    norm_card = normalize(card_text)
+
+    if not norm_biz:
+        return False
+
+    # Check if all significant words from business name appear in the card
+    biz_words = [w for w in norm_biz.split() if len(w) > 2]
+    if not biz_words:
+        return False
+
+    matches = sum(1 for w in biz_words if w in norm_card)
+    ratio = matches / len(biz_words)
+
+    # At least 40% of significant business name words must appear in the card.
+    # Lower threshold handles common variations:
+    #   "Precision Garage Door Service of Jackson" → "Precision Door Service"
+    #   "ABC Garage Doors Repair and Replacement" → "ABC Garage Doors"
+    return ratio >= 0.4
+
+
 def _parse_active_ads(text: str) -> int:
     """Find the first `Active ads · N` badge in the advertiser card text."""
     if not text:
@@ -91,14 +164,18 @@ def _parse_result_count(text: str) -> int:
 
 
 def _search_terms(biz: Business) -> list[str]:
-    """Ordered list of advertiser-search terms to try for a business."""
+    """Ordered list of advertiser-search terms to try for a business.
+
+    Business name first — Facebook's Ad Library matches names better than
+    slugs in most cases. Slug is the fallback.
+    """
     terms: list[str] = []
-    slug = _fb_slug(biz.facebook_url)
-    if slug:
-        terms.append(slug)
     name = (biz.name or "").strip()
-    if name and name not in terms:
+    if name:
         terms.append(name)
+    slug = _fb_slug(biz.facebook_url)
+    if slug and slug not in terms:
+        terms.append(slug)
     return terms
 
 
@@ -164,17 +241,21 @@ def check_meta_ads(businesses: list[Business], progress=None) -> list[Business]:
                     # Small settle to let the React app populate the badge
                     page.wait_for_timeout(800)
 
-                    body = page.inner_text("body", timeout=4000)
-                    count = _parse_active_ads(body) or _parse_result_count(body)
-                    if count > 0:
+                    # Find every "Active ads" badge on the page. Each one belongs
+                    # to a specific advertiser card. We then walk up to the card
+                    # container and check whether THAT card's text contains the
+                    # business name. Only then is the business actually running ads.
+                    is_running = _check_advertiser_card(page, biz.name or "")
+                    if is_running:
+                        count = 1
                         break
+                    # Not found with this term — try next term (slug)
                 except Exception as exc:
                     logger.debug("Meta lookup failed for %s (%s): %s", biz.name, term, exc)
 
             if count > 0:
                 biz.running_meta_ads = True
                 biz.meta_ad_snapshot_url = last_url
-                biz.meta_ad_count = count
 
                 sample = _extract_first_ad(page)
                 if sample:
@@ -186,12 +267,8 @@ def check_meta_ads(businesses: list[Business], progress=None) -> list[Business]:
                 biz.meta_ad_snapshot_url = last_url
 
             if progress:
-                progress(
-                    "meta",
-                    idx,
-                    total,
-                    f"{biz.name[:40]} — {count} active ad(s)" if count else f"{biz.name[:40]} — no ads",
-                )
+                status = "running ads" if count else "no ads"
+                progress("meta", idx, total, f"{biz.name[:40]} — {status}")
 
             time.sleep(delay)
 
