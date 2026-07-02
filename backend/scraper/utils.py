@@ -219,3 +219,193 @@ def join_unique(items: Iterable[str], sep: str = " | ") -> str:
             seen.add(key)
             out.append(s)
     return sep.join(out)
+
+
+# Homoglyph mapping to normalize text
+HOMOGLYPH_MAP = {
+    # Cyrillic lookalikes
+    '\u0430': 'a',  # а
+    '\u0435': 'e',  # е
+    '\u043e': 'o',  # о
+    '\u0440': 'p',  # р
+    '\u0441': 'c',  # с
+    '\u0443': 'y',  # у
+    '\u0445': 'x',  # х
+    '\u0456': 'i',  # і
+    '\u0455': 's',  # ѕ
+    '\u0458': 'j',  # ј
+    '\u0410': 'A',  # А
+    '\u0412': 'B',  # В
+    '\u0421': 'C',  # С
+    '\u0415': 'E',  # Е
+    '\u041d': 'H',  # Н
+    '\u041e': 'O',  # О
+    '\u0420': 'P',  # Р
+    '\u0422': 'T',  # Т
+    '\u0425': 'X',  # Х
+    # Armenian lookalikes
+    '\u057d': 'u',  # ս
+    '\u0578': 'o',  # ո
+    '\u0575': 'j',  # յ
+    '\u0581': 'g',  # ց
+    '\u0570': 'h',  # հ
+    '\u056c': 'l',  # լ
+    '\u0584': 'q',  # ք
+    '\u0585': 'o',  # օ
+    '\u0565': 'e',  # ե
+    '\u0561': 'a',  # ա
+    # Other common lookalikes/punctuation
+    '\u2019': "'",  # ’
+    '\u2018': "'",  # ‘
+    '\u201c': '"',  # “
+    '\u201d': '"',  # ”
+}
+
+
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+    # Map homoglyphs
+    chars = [HOMOGLYPH_MAP.get(c, c) for c in text]
+    return "".join(chars).lower().strip()
+
+
+def is_relevant_business(name: str, category: str, query: str) -> bool:
+    """Verify if a scraped business is relevant to the search query.
+
+    Filters out obvious mismatches like pawn shops, convenience stores,
+    or tire shops for junk car buyer queries, and non-yoga gyms for yoga queries.
+    """
+    name_normalized = normalize_text(name)
+    cat_normalized = normalize_text(category)
+    q_normalized = normalize_text(query)
+
+    # 1. Yoga queries
+    if "yoga" in q_normalized or "yogi" in q_normalized:
+        if "yoga" in name_normalized or "yogi" in name_normalized or "yoga" in cat_normalized or "yogi" in cat_normalized:
+            return True
+        return False
+
+    # 2. Garage door queries
+    if "garage door" in q_normalized or "overhead door" in q_normalized:
+        if "garage door" in cat_normalized:
+            return True
+        has_door = any(t in name_normalized or t in cat_normalized for t in ["door", "gate"])
+        has_garage = any(t in name_normalized or t in cat_normalized for t in ["garage", "overhead", "rollup", "roll-up"])
+        if has_door and has_garage:
+            return True
+        return False
+
+    # 3. Junk car / Cash for cars / Car buyer / Scrap / Salvage / Sell car queries
+    junk_car_query_terms = [
+        "junk car", "cash for car", "car buyer", "sell car",
+        "sell my car", "junk vehicle", "scrap car", "salvage car", "auto wrecker",
+        # Added
+        "buy junk car", "we buy cars", "car recycler", "pull a part", "pick a part",
+        "u-pull-it", "pick n pull", "parts yard", "wrecking yard", "auto dismantler",
+        "cash for clunkers", "vehicle recycler", "total loss buyer", "junk car removal",
+        "scrap car removal", "car removal service", "auto recycling", "vehicle recycling"
+    ]
+    if any(t in q_normalized for t in junk_car_query_terms):
+        # A. Whitelist (Always Keep — checked FIRST so genuine junk businesses
+        #    are never blocked by coincidental keyword matches in exclusions)
+        whitelist = [
+            "junkyard", "junk yard", "salvage yard", "auto wrecker",
+            "junk dealer", "salvage dealer", "scrap yard", "scrap metal", "auto recycler",
+            "auto salvage", "salvage auto", "dismantler", "scrap car", "junk car", "junkcars",
+            "cash for car", "cash 4 car", "car buyer", "used auto parts store", "auto parts recycler",
+            "we buy car", "we buy junk", "webuycars", "i buy",
+            "wrecking yard", "auto wrecking", "pick a part", "pull a part",
+            "pick n pull", "u-pull-it", "u pull it", "self service auto",
+            "vehicle recycler", "car recycling", "vehicle recycling", "auto recycling",
+            "buy junk", "cash 4 junk", "junk vehicle", "scrap vehicle",
+            "car dismantling", "vehicle dismantling", "end of life vehicle",
+            "total loss vehicle", "used parts yard", "breakers yard",
+            "car removal", "cash for scrap", "scrap car removal",
+            "cash for clunkers", "auto dismantler", "car dismantler",
+            "cash for junk", "we buy scrap", "junk car removal",
+            "sell car for cash", "sell my car", "sell my junk", "junk my car",
+            "auto buyer", "vehicle buyer", "truck buyer",
+        ]
+        if any(w in name_normalized or w in cat_normalized for w in whitelist):
+            return True
+
+        # B. Hard Exclusions (Definitely Irrelevant)
+        hard_exclusions = [
+            "chiropractor", "doctor", "physiotherapy", "accident clinic", "accident center",
+            "haunted house", "jewelry", "gold buyer", "diamond buyer", "silver buyer",
+            "self-storage", "sure storage", "appliance", "furniture", "mattress",
+            "dumpster", "debris", "trash", "garbage", "waste management", "waste collection",
+            "haul junk", "junk removal", "junk hauling", "hauling junk", "college hunks",
+            "window tint", "upholstery", "welder", "welding", "charity", "consultant",
+            "pawn shop", "pawnbroker", "estate sale", "auction house", "moving company",
+            "metal roofing", "plumber", "electrician", "hvac", "locksmith",
+            "rental car", "car rental", "parking", "valet", "car museum",
+            "donation", "nonprofit", "food truck", "title company", "tag & title",
+            "tag and title",
+            # Grocery / Retail / Lifestyle
+            "grocery", "supermarket", "farmers market", "h-e-b", "sprouts",
+            "bowling", "apartment", "outlet mall", "premium outlet",
+            "antique", "flea market", "thrift store", "thrift", "goodwill",
+            "restaurant", "cafe", "food pantry", "pecan", "lumber",
+            "safe & vault", "safe and vault", "office depot", "office supply",
+            "electronics store", "landscaper", "landscaping", "asphalt", "paving",
+            "demolition", "property maintenance", "home improvement", "habitat for humanity",
+            "mover", "movers", "moving", "relocation",
+            # E-waste / General recycling (not auto/metal)
+            "e-waste", "ewaste", "aggregate", "brush collection",
+            "battery store", "battery warehouse", "battery center",
+            "auto parts manufacturer"
+        ]
+        if any(t in name_normalized or t in cat_normalized for t in hard_exclusions):
+            return False
+
+        # C. Soft Exclusions (Standard Auto Services / Dealerships)
+        soft_exclusions = [
+            "dealer", "dealership", "autosales", "autoplex",
+            "repair", "mechanic", "service", "services", "transport", "tows",
+            "parts supplier", "accessories", "detailing", "detail shop", "carwash", "car wash",
+            "tire", "tires", "glass", "windshield", "transmission", "muffler", "brake", "collision", "body shop",
+            "insurance", "agency", "pound", "government", "association", "corporate",
+            "bmw", "toyota", "nissan", "ford", "mercedes", "mazda", "subaru", "porsche", "infiniti",
+            "chevrolet", "honda", "lexus", "audi", "hyundai", "kia", "jeep", "chrysler", "dodge", "ram",
+            "volvo", "cadillac", "buick", "gmc", "acura", "mitsubishi", "tesla",
+            "towing company", "towing service", "roadside towing",
+            "public auction", "government auction", "vehicle auction", "auto auction",
+            "title company", "tag agency",
+            "auto sales", "car sales", "vehicle sales",
+            "parts store",
+            # General recycling (not auto/metal specific)
+            "recycling center", "recycling drop-off", "recycle center",
+            "recycling department", "materials recovery",
+            # Storage / Boats / Other
+            "storage facility", "automobile storage", "boat"
+        ]
+        if any(t in name_normalized or t in cat_normalized for t in soft_exclusions):
+            return False
+
+        # Default: reject unknown categories to prevent data leakage
+        return False
+
+    # 4. Fallback for other queries
+    STOP_WORDS = {
+        "repair", "service", "services", "installation", "install", "maintenance",
+        "near", "me", "in", "of", "and", "the", "a", "to", "for", "on", "with",
+        "best", "top", "local", "company", "companies", "corp", "inc", "llc", "group"
+    }
+    q_words = [w for w in re.findall(r"\b[a-z0-9]+\b", q_normalized) if w not in STOP_WORDS]
+    if not q_words:
+        return True
+
+    for w in q_words:
+        if len(w) >= 4:
+            if w in name_normalized or w in cat_normalized:
+                return True
+        else:
+            name_words = re.findall(r"\b[a-z0-9]+\b", name_normalized)
+            cat_words = re.findall(r"\b[a-z0-9]+\b", cat_normalized)
+            if w in name_words or w in cat_words:
+                return True
+
+    return False
+

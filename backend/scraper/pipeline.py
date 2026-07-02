@@ -11,7 +11,8 @@ import re
 from .config import settings
 from .maps import CSV_COLUMNS, Business, search_google_maps
 from .meta_ads import check_meta_ads
-from .utils import default_filename, domain, get_logger, parse_locations, write_csv
+from .linkedin import enrich_linkedin
+from .utils import default_filename, domain, get_logger, parse_locations, write_csv, is_relevant_business
 from .website import enrich_websites
 
 logger = get_logger("scraper.pipeline")
@@ -103,6 +104,7 @@ def run_pipeline(
     *,
     skip_websites: bool = False,
     skip_meta: bool = False,
+    skip_linkedin: bool = False,
     output_basename: Optional[str] = None,
     progress: Optional[ProgressFn] = None,
 ) -> PipelineResult:
@@ -164,17 +166,21 @@ def run_pipeline(
                     f"Maps search failed on the first attempt: {exc}"
                 ) from exc
             found = []
-        # Tag each business with the keyword that surfaced it (handy when
-        # downstream users want to see which query a lead came from).
+        # Tag each business with the keyword that surfaced it and filter relevance
+        relevant_found = []
         for b in found:
             if not b.category:
                 b.category = q
-        all_businesses.extend(found)
+            if is_relevant_business(b.name, b.category, q):
+                relevant_found.append(b)
+            else:
+                logger.info("Filtered out irrelevant lead: %s (%s)", b.name, b.category)
+        all_businesses.extend(relevant_found)
         emit(
             "maps_location_done",
             idx,
             len(combos),
-            f"{q} / {loc}: {len(found)} found (running total {len(all_businesses)})",
+            f"{q} / {loc}: {len(relevant_found)} relevant found of {len(found)} (running total {len(all_businesses)})",
         )
 
     businesses = _dedupe(all_businesses)
@@ -222,6 +228,18 @@ def run_pipeline(
             logger.error("Website enrichment failed: %s — partial maps data preserved in %s", exc, maps_csv)
             raise
 
+    if not skip_linkedin:
+        try:
+            enrich_linkedin(businesses, progress=progress, headless=settings.linkedin.headless)
+            emit("linkedin_done", len(businesses), len(businesses), "LinkedIn URL enrichment complete")
+            # Checkpoint #3: after LinkedIn enrichment
+            li_csv = _save_checkpoint("linkedin")
+            emit("linkedin_saved", len(businesses), len(businesses),
+                 f"LinkedIn checkpoint saved: {li_csv.name}")
+        except Exception as exc:
+            logger.error("LinkedIn enrichment failed: %s — partial data preserved in checkpoints", exc)
+            # Non-fatal: continue to Meta and final CSV
+
     if not skip_meta:
         try:
             check_meta_ads(businesses, progress=progress)
@@ -239,3 +257,4 @@ def run_pipeline(
          f"Saved {csv_path.name} ({len(rows)} rows from {len(businesses)} businesses)")
 
     return PipelineResult(businesses=businesses, csv_path=csv_path)
+

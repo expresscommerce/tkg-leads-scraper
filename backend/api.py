@@ -17,9 +17,13 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+# pyrefly: ignore [missing-import]
 from fastapi import FastAPI, HTTPException
+# pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
+# pyrefly: ignore [missing-import]
 from fastapi.responses import FileResponse
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel, Field
 
 from scraper.pipeline import run_pipeline
@@ -61,6 +65,7 @@ class RunRequest(BaseModel):
     )
     skip_websites: bool = False
     skip_meta: bool = False
+    skip_linkedin: bool = False
     output_basename: str | None = None
 
 
@@ -89,6 +94,7 @@ def _execute(job_id: str, req: RunRequest) -> None:
             max_results=req.max_results,
             skip_websites=req.skip_websites,
             skip_meta=req.skip_meta,
+            skip_linkedin=req.skip_linkedin,
             output_basename=req.output_basename,
             progress=progress,
         )
@@ -182,6 +188,7 @@ def list_jobs() -> dict[str, Any]:
 
 
 if __name__ == "__main__":
+    # pyrefly: ignore [missing-import]
     import uvicorn
 
     port = int(os.environ.get("PORT", 8000))

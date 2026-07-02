@@ -28,8 +28,11 @@ if _PW_DIR.exists():
 # Make backend/scraper importable
 sys.path.insert(0, str(_Path(__file__).parent / "backend"))
 
+# pyrefly: ignore [missing-import]
 from scraper.config import settings
+# pyrefly: ignore [missing-import]
 from scraper.pipeline import run_pipeline
+# pyrefly: ignore [missing-import]
 from scraper.utils import get_logger
 
 
@@ -68,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", "-o", help="Output basename (no extension)")
     parser.add_argument("--no-websites", action="store_true", help="Skip website enrichment")
     parser.add_argument("--no-meta", action="store_true", help="Skip Meta ads check")
+    parser.add_argument("--no-linkedin", action="store_true", help="Skip LinkedIn enrichment")
     parser.add_argument("--debug", action="store_true")
 
     args = parser.parse_args(argv)
@@ -99,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         max_results=args.max_results,
         skip_websites=args.no_websites,
         skip_meta=args.no_meta,
+        skip_linkedin=args.no_linkedin,
         output_basename=args.output,
         progress=_progress,
     )

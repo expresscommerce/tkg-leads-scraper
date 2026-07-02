@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+# pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -66,6 +67,17 @@ class MetaAdsSettings:
 
 
 @dataclass
+class LinkedInSettings:
+    """LinkedIn enrichment settings."""
+
+    enabled: bool = True
+    headless: bool = True
+    delay_seconds: float = 2.0
+    ddg_min_delay: float = 1.5
+    ddg_max_delay: float = 3.5
+
+
+@dataclass
 class Settings:
     output_dir: Path = field(default_factory=lambda: DEFAULT_OUTPUT_DIR)
     log_level: str = "INFO"
@@ -74,6 +86,7 @@ class Settings:
     maps: MapsSettings = field(default_factory=MapsSettings)
     website: WebsiteSettings = field(default_factory=WebsiteSettings)
     meta: MetaAdsSettings = field(default_factory=MetaAdsSettings)
+    linkedin: LinkedInSettings = field(default_factory=LinkedInSettings)
 
     def __post_init__(self) -> None:
         self.log_level = os.environ.get("LOG_LEVEL", self.log_level).upper()
@@ -91,6 +104,10 @@ class Settings:
         self.meta.country = os.environ.get("META_AD_COUNTRY", self.meta.country)
         self.meta.headless = _env_bool("META_HEADLESS", self.meta.headless)
         self.meta.delay_seconds = _env_float("META_DELAY_SECONDS", self.meta.delay_seconds)
+
+        self.linkedin.enabled = _env_bool("LINKEDIN_ENABLED", self.linkedin.enabled)
+        self.linkedin.headless = _env_bool("LINKEDIN_HEADLESS", self.linkedin.headless)
+        self.linkedin.delay_seconds = _env_float("LINKEDIN_DELAY_SECONDS", self.linkedin.delay_seconds)
 
         out = os.environ.get("OUTPUT_DIR")
         if out:

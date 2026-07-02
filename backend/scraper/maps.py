@@ -30,6 +30,8 @@ class Business:
     facebook_url: str = ""
     instagram_url: str = ""
     tiktok_url: str = ""
+    linkedin_url: str = ""
+    company_size: str = ""
     running_meta_ads: bool = False
     meta_ad_snapshot_url: str = ""
     meta_ad_start_date: str = ""
@@ -69,6 +71,8 @@ class Business:
             "facebook_url": self.facebook_url,
             "instagram_url": self.instagram_url,
             "tiktok_url": self.tiktok_url,
+            "linkedin_url": self.linkedin_url,
+            "company_size": self.company_size,
             "running_meta_ads": self.running_meta_ads,
             "meta_ad_library_url": self.meta_ad_snapshot_url,
             "meta_ad_start_date": self.meta_ad_start_date,
@@ -100,6 +104,8 @@ CSV_COLUMNS = [
     "facebook_url",
     "instagram_url",
     "tiktok_url",
+    "linkedin_url",
+    "company_size",
     "running_meta_ads",
     "meta_ad_library_url",
     "meta_ad_start_date",
@@ -230,8 +236,17 @@ def search_google_maps(
                     const text = (card.innerText || '').trim();
                     // Website is exposed as a separate anchor with this
                     // data-value attribute on Maps result cards.
-                    const webEl = card.querySelector('a[data-value=\"Website\"]');
-                    const website = webEl ? webEl.getAttribute('href') || '' : '';
+                    let webEl = card.querySelector('a[data-value=\"Website\"]');
+                    let website = webEl ? webEl.getAttribute('href') || '' : '';
+                    if (!website) {
+                      // fallback: find any anchor whose href is an external link (not google.com/maps)
+                      const allLinks = Array.from(card.querySelectorAll('a[href]'));
+                      const extLink = allLinks.find(link => {
+                        const href = link.getAttribute('href') || '';
+                        return href.startsWith('http') && !href.includes('google.com/maps');
+                      });
+                      if (extLink) website = extLink.getAttribute('href') || '';
+                    }
                     // Rating widget exposes "X.Y stars N Reviews" via
                     // aria-label on a span.
                     const rateEl = card.querySelector(
@@ -269,32 +284,74 @@ def search_google_maps(
                     logger.debug("Card %s parse failed: %s", i, exc)
                     continue
 
-            # Second pass: addresses are no longer in the card text on modern
-            # Google Maps. Visit each business's place URL and read the address
-            # from the side panel's `[data-item-id="address"]` button. Slower,
-            # but the only reliable way to get a full street address.
-            for i, biz in enumerate(results):
-                if biz.address or not biz.maps_url:
-                    continue
-                try:
-                    addr = _fetch_address(page, biz.maps_url)
-                    if addr:
-                        biz.address = addr
-                except Exception as exc:
-                    logger.debug("Address fetch failed for %s: %s", biz.name, exc)
-                if progress:
-                    progress(
-                        "maps",
-                        i + 1,
-                        len(results),
-                        f"Address: {biz.name[:40]} — {biz.address[:50] or 'n/a'}",
-                    )
+            # Second pass: parallel enrichment of business details (address, category, phone, website)
+            # from place detail pages using ThreadPoolExecutor and Playwright.
+            enrich_maps_details_parallel(results, progress=progress)
         finally:
             ctx.close()
             browser.close()
 
     logger.info("Maps captured %d businesses", len(results))
     return results
+
+
+def enrich_maps_details_parallel(
+    businesses: list[Business],
+    *,
+    progress=None,
+    num_workers: int = 4
+) -> None:
+    """Visit each business's place URL in parallel to extract full details from the side panel."""
+    targets = [b for b in businesses if b.maps_url]
+    if not targets:
+        return
+
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    # pyrefly: ignore [missing-import]
+    from playwright.sync_api import sync_playwright
+
+    total = len(targets)
+    completed = 0
+    lock = threading.Lock()
+
+    def worker(biz_chunk: list[Business]):
+        nonlocal completed
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=settings.maps.headless)
+            ctx = browser.new_context(
+                user_agent=settings.website.user_agent,
+                locale="en-US",
+                viewport={"width": 1024, "height": 768},
+            )
+            for biz in biz_chunk:
+                page = ctx.new_page()
+                try:
+                    page.goto(biz.maps_url, wait_until="domcontentloaded", timeout=15_000)
+                    _extract_details(page, biz)
+                except Exception as exc:
+                    logger.debug("Failed to enrich details for %s: %s", biz.name, exc)
+                finally:
+                    page.close()
+
+                with lock:
+                    completed += 1
+                    if progress:
+                        progress(
+                            "maps",
+                            completed,
+                            total,
+                            f"Address: {biz.name[:40]} — {biz.address[:50] or 'n/a'}",
+                        )
+            ctx.close()
+            browser.close()
+
+    chunks = [targets[i::num_workers] for i in range(num_workers)]
+    chunks = [c for c in chunks if c]
+
+    logger.info("Enriching %d listings using %d parallel workers...", total, len(chunks))
+    with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+        executor.map(worker, chunks)
 
 
 _CARD_PHONE_RE = re.compile(

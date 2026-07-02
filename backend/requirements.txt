@@ -2,12 +2,17 @@
 python-dotenv>=1.0.0
 requests>=2.31.0
 beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
 
 # Search
 ddgs>=7.0.0
 
 # Browser automation (Google Maps)
-playwright==1.58.0
+playwright>=1.58.0
+
+# Stealth browser (LinkedIn search — bypasses antibot)
+cloakbrowser>=0.3.0
 
 # Data handling
 pandas>=2.0.0
